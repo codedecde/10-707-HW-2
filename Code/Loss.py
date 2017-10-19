@@ -37,9 +37,10 @@ class binary_cross_entropy(Loss):
     def __call__(self, y, output):
         output += self.eps
         batch_size = y.shape[0]
-        units = y.shape[1]
+        # units = y.shape[1]
+        units = 1.
         loss = -1. * ((y * np.log(output)) + ((1. - y) * (np.log(1. - output))))
-        self._grad = (output - y) / (output * (1. - output)) / units
+        self._grad = (output - y) / (output * (1. - output) * units)
         loss = np.sum(loss) / (batch_size * units)
         return loss
 
@@ -51,7 +52,7 @@ class mean_square_error(Loss):
     def __call__(self, y, output):
         output += self.eps
         batch_size = y.shape[0]
-        loss = -0.5 * (output - y) * (output - y)
-        self._grad = output * (output - y)
+        loss = 0.5 * (output - y) * (output - y)
+        self._grad = (output - y)
         loss = np.sum(loss) / batch_size
         return loss
