@@ -1,19 +1,42 @@
 import numpy as np
 import pdb
 import activations as A
-from utils import Progbar, gen_array_from_file
+from utils import Progbar, gen_array_from_file, plot
 import cPickle as cp
-import matplotlib
 from Layers import Variable
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from Loss import binary_cross_entropy
+import argparse
+import sys
+from optimizers import SGD
 
-# LOAD THE DATA ###
-data_train = gen_array_from_file("Data/digitstrain.txt")
-train_x = data_train[:, :-1]
-data_val = gen_array_from_file("Data/digitsvalid.txt")
-val_x = data_val[:, :-1]
-SAMPLE = False
+
+SAMPLE = True
+
+
+def get_arguments():
+    def check_boolean(args, attr_name):
+        assert hasattr(args, attr_name), "%s not found in parser" % (attr_name)
+        bool_set = set(["true", "false"])
+        args_value = getattr(args, attr_name)
+        args_value = args_value.lower()
+        assert args_value in bool_set, "Boolean argument required for attribute %s" % (attr_name)
+        args_value = False if args_value == "false" else True
+        setattr(args, attr_name, args_value)
+        return args
+    parser = argparse.ArgumentParser(description='Restricted Boltzmann machine')
+    parser.add_argument('-n_hidden', action="store", default=200, dest="n_hidden", type=int)
+    parser.add_argument('-batch', action="store", default=64, dest="batch_size", type=int)
+    parser.add_argument('-l2', action="store", default=0.000, dest="l2", type=float)
+    parser.add_argument('-lr', action="store", default=0.01, dest="lr", type=float)
+    parser.add_argument('-momentum', action="store", default=0.0, dest="momentum", type=float)
+    parser.add_argument('-n_epochs', action="store", default=50, dest="n_epochs", type=int)
+    parser.add_argument('-plot_after', action="store", default=5, dest="plot_after", type=int)
+    parser.add_argument('-cd_k', action="store", default=1, dest="cd_k", type=int)
+    parser.add_argument('-gibbs_steps', action='store', default=1000, dest='gibbs_steps', type=int)
+    # Using strings as a proxy for boolean flags. Checks happen later
+    args = parser.parse_args(sys.argv[1:])
+    # Checks for the boolean flags
+    return args
 
 
 class RBM(object):
@@ -29,7 +52,10 @@ class RBM(object):
         self.W = Variable(W)  # in_dim x hidden_dim
         self.b = Variable(b)  # hidden_dim,
         self.c = Variable(c)  # in_dim,
-        self.parameters = {"W": self.W, "b": self.b, "c": self.c}
+        self.params = {'rbm_layer': {"W": self.W, "b": self.b, "c": self.c}}
+
+    def parameters(self):
+        return self.params
 
     def _h_given_x(self, x):
         """
@@ -47,7 +73,7 @@ class RBM(object):
         """
         return A.sigmoid(np.dot(h, self.W.data.transpose()) + self.c.data)
 
-    def compute_grad(self, x, x_tilde):
+    def backward(self, x, x_tilde):
         """
         Computes E_{h|x}(\nabla_{\theta} -log(p(h,x))) - E_{x, h}(\nabla_{\theta} -log(p(h,x)))
         x_tilde is the MCMC sample to approximate the E_{x, h}
@@ -74,128 +100,72 @@ class RBM(object):
         sample = 1. * (sample < probs)
         return sample
 
-    def gibbs_sampler(self, x, k):
+    def gibbs_sampler(self, x, k, return_probs=True):
         """
         Gibbs sampler. Samples hidden state, and then the image. Does it k times.
             :param x: batch x in_dim: The true image
             :param k: int: The number of steps to carry out
-            :return x_tilde: batch x in_dim: The probability of the sampled image
+            :param return_probs: bool: Return a sample or the probability distribution as the result
+            :return x_: batch x in_dim: The output image, as controlled by return_probs
         """
         x_tilde = x
+        x_probs = None
+        x_sample = None
         for ix in xrange(k):
             # Sample h
-            h = self._h_given_x(x_tilde)
-            if SAMPLE:
-                h = self.sample(h)
-            x_tilde = self._x_given_h(h)
-            if ix != k - 1 and SAMPLE:
-                x_tilde = self.sample(x_tilde)
-        return x_tilde
+            h_probs = self._h_given_x(x_tilde)
+            h_sample = self.sample(h_probs)
+            h = h_sample if SAMPLE else h_probs
+            x_probs = self._x_given_h(h)
+            x_sample = self.sample(x_probs)
+            x_tilde = x_sample if SAMPLE else x_probs
+        ret_img = x_probs if return_probs else x_sample
+        return ret_img
 
 
-class SGD(object):
-    def __init__(self, parameters, lr=0.01):
-        # TODO : Add momentum
-        self.params = parameters
-        self.lr = lr
-
-    def step(self):
-        for param in self.params:
-            if type(param) == dict:
-                # params is a list of dictionaries. param is a dictionary
-                for key in param:
-                    param[key].data -= self.lr * param[key].grad
-            else:
-                # params is a dictionary of parameters. param is the key
-                self.params[param].data -= self.lr * self.params[param].grad
-
-    def zero_grad(self):
-        for param in self.params:
-            if type(param) == dict:
-                # params is a list of dictionaries. param is a dictionary
-                for key in param:
-                    param[key].grad = np.zeros(param[key].data.shape)
-            else:
-                # params is a dictionary of parameters. param is the key
-                self.params[param].grad = np.zeros(self.params[param].data.shape)
-
-
-def cross_entropy(true_image, sampled_image):
-    """
-    Computes the cross entropy loss between the true image and the sampled image
-        :param true_image: batch x in_dim: The true image
-        :param sampled_image: batch x in_dim: The sampled image
-        :return loss: float: The average cross_entropy loss
-    """
-    loss = -1. * np.sum((true_image * np.log(sampled_image + np.finfo(float).eps) + ((1. - true_image) * np.log(1. - sampled_image + np.finfo(float).eps)))) / (true_image.shape[0] * true_image.shape[1])
-    return loss
-
-
-def plot(array, filename, epoch):
-    cols = int(np.sqrt(array.shape[0]))
-    rows = (array.shape[0] // cols) if (array.shape[0] % cols == 0) else (array.shape[0] // cols) + 1
-    fig, axes = plt.subplots(nrows=rows, ncols=cols)
-    fig.suptitle('Images After {} epochs'.format(epoch))
-    index = 0
-    for row_ix, row in enumerate(axes):
-        for col_ix, ax in enumerate(row):
-            if index >= array.shape[0]:
-                ax.imshow(np.zeros((28, 28)), cmap='gray')
-            else:
-                ax.imshow(array[index, :].reshape((28, 28)), cmap='gray')
-            index += 1
-            ax.set_xticks([])
-            ax.set_yticks([])
-    plt.savefig(filename)
-    plt.close()
-
-
-HIDDEN_DIM = 200
-IN_DIM = train_x.shape[1]
-N_EPOCHS = 200
-BATCH_SIZE = 64
-prev_sample = None
-PLOT_AFTER = 20
-PLOT_GIBBS_STEPS = 100
-k = 5
-lr = 0.01
-
-rbm = RBM(IN_DIM, HIDDEN_DIM)
-optimizer = SGD(rbm.parameters, lr=lr)
-batch_ix = 0
-bar = Progbar(N_EPOCHS)
-for epoch in xrange(N_EPOCHS):
-    steps = train_x.shape[0] // BATCH_SIZE if (train_x.shape[0] % BATCH_SIZE == 0) else (train_x.shape[0] // BATCH_SIZE) + 1
-    avg_train_loss = 0.
-    for step in xrange(steps):
-        batch_x = train_x[batch_ix: batch_ix + BATCH_SIZE, :]
-        batch_ix += BATCH_SIZE
-        if batch_ix >= train_x.shape[0]:
-            batch_ix = 0
-        model_probs = rbm.gibbs_sampler(batch_x, k)
-        if SAMPLE:
-            model_sample = rbm.sample(model_probs)
-        else:
-            model_sample = model_probs
-        prev_sample = model_sample
-        train_loss = cross_entropy(batch_x, model_probs)
-        avg_train_loss += train_loss
-        rbm.compute_grad(batch_x, model_sample)
-        optimizer.step()
-        # Clean Up
-        optimizer.zero_grad()
-    avg_train_loss /= steps
-    val_loss = cross_entropy(val_x, rbm.gibbs_sampler(val_x, k))
-    bar.update(epoch + 1, values=[("train_loss", avg_train_loss), ("val_loss", val_loss)])
-    if (epoch + 1) % PLOT_AFTER == 0:
-        # index = range(train_x.shape[0])
-        # random.shuffle(index)
-        # random_train = train_x[index, :][:16,:]
-        random_train = np.random.normal(0, 1., (16, 784))
-        sample = rbm.gibbs_sampler(random_train, PLOT_GIBBS_STEPS)
-        if SAMPLE:
-            sample = rbm.sample(sample)
-        plot(sample, "Plots/Image_Epoch_{}.png".format(epoch + 1), epoch + 1)
-# Save the weights
-save_filename = "Models/weights_hdim_%d_epochs_%d_val_%.4f_k_%d.pkl" % (HIDDEN_DIM, N_EPOCHS, val_loss, k)
-cp.dump(rbm, open(save_filename, "wb"))
+if __name__ == "__main__":
+    # LOAD THE DATA ###
+    data_train = gen_array_from_file("Data/digitstrain.txt")
+    train_x = data_train[:, :-1]
+    data_val = gen_array_from_file("Data/digitsvalid.txt")
+    val_x = data_val[:, :-1]
+    args = get_arguments()
+    IN_DIM = train_x.shape[1]
+    BATCH_SIZE = args.batch_size
+    k = args.cd_k
+    lr = args.lr
+    cross_entropy = binary_cross_entropy()
+    rbm = RBM(IN_DIM, args.n_hidden)
+    optimizer = SGD(rbm.parameters(), lr=lr, l2=args.l2, momentum=args.momentum)
+    batch_ix = 0
+    bar = Progbar(args.n_epochs)
+    for epoch in xrange(args.n_epochs):
+        steps = train_x.shape[0] // BATCH_SIZE if (train_x.shape[0] % BATCH_SIZE == 0) else (train_x.shape[0] // BATCH_SIZE) + 1
+        avg_train_loss = 0.
+        for step in xrange(steps):
+            batch_x = train_x[batch_ix: batch_ix + BATCH_SIZE, :]
+            batch_ix += BATCH_SIZE
+            if batch_ix >= train_x.shape[0]:
+                batch_ix = 0
+            model_probs = rbm.gibbs_sampler(batch_x, k, return_probs=True)
+            model_sample = rbm.sample(model_probs) if SAMPLE else model_probs
+            train_loss = cross_entropy(batch_x, model_probs)
+            avg_train_loss += train_loss
+            rbm.backward(batch_x, model_sample)
+            optimizer.step()
+            # Clean Up
+            optimizer.zero_grad()
+        avg_train_loss /= steps
+        val_sample = rbm.gibbs_sampler(val_x, k, return_probs=True)
+        val_loss = cross_entropy(val_x, val_sample)
+        bar.update(epoch + 1, values=[("train_loss", avg_train_loss), ("val_loss", val_loss)])
+        if (epoch + 1) % args.plot_after == 0:
+            # index = range(train_x.shape[0])
+            # random.shuffle(index)
+            # random_train = train_x[index, :][:16,:]
+            random_train = np.random.uniform(0, 1., (100, 784))
+            sample = rbm.gibbs_sampler(random_train, args.gibbs_steps, return_probs=True)
+            plot(sample, "Plots/Image_Epoch_{}.png".format(format(epoch + 1, '03')), epoch + 1)
+    # Save the weights
+    save_filename = "Models/weights_hdim_%d_epochs_%d_val_%.4f_k_%d.pkl" % (args.n_hidden, args.n_epochs, val_loss, k)
+    cp.dump(rbm, open(save_filename, "wb"))

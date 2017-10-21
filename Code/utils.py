@@ -1,10 +1,34 @@
 import numpy as np
 import time
 import sys
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 '''
     Utility functions
     Taken from keras code : https://keras.io/
 '''
+
+
+def plot(array, filename, epoch):
+    cols = int(np.sqrt(array.shape[0]))
+    rows = (array.shape[0] // cols) if (array.shape[0] % cols == 0) else (array.shape[0] // cols) + 1
+    fig, axes = plt.subplots(nrows=rows, ncols=cols)
+    fig.suptitle('Images After {} epochs'.format(epoch))
+    index = 0
+    for row_ix, row in enumerate(axes):
+        for col_ix, ax in enumerate(row):
+            if index >= array.shape[0]:
+                ax.imshow(np.zeros((28, 28)), cmap='gray')
+            else:
+                ax.imshow(array[index, :].reshape((28, 28)), cmap='gray')
+            index += 1
+            ax.set_xticks([])
+            ax.set_yticks([])
+    plt.savefig(filename)
+    plt.close()
+
 
 def gen_array_from_file(filename):
     data = []
